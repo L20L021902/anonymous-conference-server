@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use {
+    log::{info, error, warn, debug},
     async_std::net::{TcpListener, TcpStream},
     async_std::io::{BufReader, ReadExt, WriteExt},
     async_std::task,
@@ -52,7 +53,7 @@ impl ProtocolManager {
 
         listener.incoming().for_each_concurrent(None, |stream| async {
             if let Ok(stream) = stream {
-                println!("Connection established!");
+                debug!("Connection established!");
                 task::spawn({
                     let protocol_manager = Arc::clone(&self);
                     async move {
@@ -60,7 +61,7 @@ impl ProtocolManager {
                     }
                 });
             } else {
-                println!("Failed to establish connection");
+                warn!("Failed to establish connection");
             }
         })
         .await;
@@ -68,14 +69,14 @@ impl ProtocolManager {
 
     fn report_error(&self, error: ConnectionError) {
         match error.kind {
-            ConnectionErrorKind::IoError => println!("Connection failed due to IO error: {}", error.message),
-            ConnectionErrorKind::ProtocolError => println!("Connection failed due to protocol error: {}", error.message),
+            ConnectionErrorKind::IoError => warn!("Connection failed due to IO error: {}", error.message),
+            ConnectionErrorKind::ProtocolError => warn!("Connection failed due to protocol error: {}", error.message),
         }
     }
 
     fn shutdown_connection(&self, stream: TcpStream) {
         if stream.shutdown(std::net::Shutdown::Both).is_err() {
-            println!("Failed to close connection");
+            error!("Failed to close connection");
         }
     }
 
@@ -88,7 +89,7 @@ impl ProtocolManager {
             return;
         }
 
-        println!("Connection handled successfully");
+        debug!("Connection handled successfully");
         self.shutdown_connection(stream);
     }
 
