@@ -7,7 +7,7 @@ use {
     async_std::task,
     async_std::prelude::*,
     futures::{StreamExt, channel::mpsc, sink::SinkExt},
-    crate::constants::{PROTOCOL_HEADER, ConnectionError, ConnectionErrorKind, ClientAction, PeerId, ConferenceId, MessageNonce, MessageLength},
+    crate::constants::{PROTOCOL_HEADER, ConnectionError, ConnectionErrorKind, ClientAction, PeerId, ConferenceId, MessageNonce, MessageLength, ServerToClientMessageType},
     crate::broker::{Broker, Event, Sender},
 };
 
@@ -261,22 +261,6 @@ async fn handle_handshake(reader: &mut BufReader<&TcpStream>) -> Result<(), Conn
     }
 
     Ok(())
-}
-
-#[repr(u8)]
-pub enum ServerToClientMessageType<'a> {
-    HandshakeAcknowledged = 0x00,
-    ConferenceCreated(u32) = 0x01,
-    ConferenceJoined = 0x02,
-    ConferenceLeft = 0x03,
-    MessageAccepted = 0x04,
-    IncomingMessage(&'a Vec<u8>) = 0x05,
-
-    GeneralError = 0x10,
-    ConferenceCreationError = 0x11,
-    ConferenceJoinError = 0x12,
-    ConferenceLeaveError = 0x13,
-    MessageError = 0x14,
 }
 
 pub async fn send_message_to_peer(message_type: ServerToClientMessageType<'_>, sender: &Sender<Vec<u8>>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

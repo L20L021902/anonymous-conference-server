@@ -45,3 +45,20 @@ impl TryFrom<u8> for ClientAction {
         }
     }
 }
+
+#[repr(u8)]
+pub enum ServerToClientMessageType<'a> {
+    HandshakeAcknowledged = 0x00,
+    ConferenceCreated(u32) = 0x01,
+    ConferenceJoined = 0x02,
+    ConferenceLeft = 0x03,
+    MessageAccepted = 0x04,
+    IncomingMessage(&'a Vec<u8>) = 0x05,
+
+    GeneralError = 0x10,
+    ConferenceCreationError = 0x11,
+    ConferenceJoinError = 0x12,
+    ConferenceLeaveError = 0x13,
+    MessageError = 0x14,
+}
+

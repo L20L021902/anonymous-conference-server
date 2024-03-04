@@ -3,14 +3,12 @@ use async_std::{prelude::*, net::TcpStream, io::WriteExt};
 use log::{warn, info, debug};
 use futures::channel::mpsc;
 use futures::sink::SinkExt;
-use futures::FutureExt;
-use futures::select;
 use async_std::task;
 
 use openssl::memcmp;
 
-use crate::constants::{PeerId, ConferenceId, MessageNonce};
-use crate::protocol::{ServerToClientMessageType, send_message_to_peer};
+use crate::constants::{PeerId, ConferenceId, MessageNonce, ServerToClientMessageType};
+use crate::protocol::send_message_to_peer;
 
 struct Conference {
     password_hash: [u8; 32],
