@@ -1,7 +1,5 @@
 use std::{sync::Arc, net::IpAddr};
 
-use futures::AsyncWriteExt;
-
 use {
     log::{info, error, warn, debug},
     async_std::net::{TcpListener, TcpStream},
@@ -9,26 +7,9 @@ use {
     async_std::task,
     async_std::prelude::*,
     futures::{StreamExt, channel::mpsc, sink::SinkExt},
-    crate::broker::{Broker, Event, Sender, Void},
+    crate::constants::{PROTOCOL_HEADER, ConnectionError, ConnectionErrorKind, ClientAction, PeerId, ConferenceId, MessageNonce, MessageLength},
+    crate::broker::{Broker, Event, Sender},
 };
-
-pub const PROTOCOL_HEADER: &[u8] = b"\x1CAnonymousConference protocol";
-// The handshake starts with character twenty eight (decimal) followed by the string
-// 'AnonymousConference protocol'. The leading character is a length prefix.
-
-pub type PeerId = (IpAddr, u16);
-
-pub type ConferenceId = u32;
-
-struct ConnectionError {
-    kind: ConnectionErrorKind,
-    message: String,
-}
-
-enum ConnectionErrorKind {
-    IoError,
-    ProtocolError,
-}
 
 async fn read_stdio(mut sender: Sender<Event>) {
     let mut input = String::new();
@@ -83,24 +64,24 @@ pub async fn enter_main_loop(listening_address: String, listening_port: u16) {
 
 async fn handle_connection(mut broker: Sender<Event>, stream: TcpStream) {
     let stream = Arc::new(stream);
-    let mut buf_reader = BufReader::new(&*stream);
+    let mut reader = BufReader::new(&*stream);
 
     // check handshake
-    if let Err(e) = handle_handshake(&mut buf_reader).await {
+    if let Err(e) = handle_handshake(&mut reader).await {
         report_error(e);
         shutdown_connection(stream);
         return;
     }
 
     let peer_addr = stream.peer_addr().unwrap();
+    let peer_id = (peer_addr.ip(), peer_addr.port());
     broker.send(Event::NewPeer {
-        peer_id: (peer_addr.ip(), peer_addr.port()),
+        peer_id,
         stream: Arc::clone(&stream),
     }).await.unwrap();
 
-    // read incoming messages from the peer
     loop {
-        match read_message(&stream).await {
+        match read_message(&mut broker, &peer_id, &mut reader).await {
             Ok(true) => {
                 // keep connection open
                 continue;
@@ -112,6 +93,9 @@ async fn handle_connection(mut broker: Sender<Event>, stream: TcpStream) {
             },
             Err(e) => {
                 report_error(e);
+                broker.send(Event::RemovePeer {
+                    peer_id,
+                }).await.unwrap();
                 shutdown_connection(stream);
                 return;
             },
@@ -123,8 +107,127 @@ async fn handle_connection(mut broker: Sender<Event>, stream: TcpStream) {
 /// returns true if the connection should be kept open, false if it should be closed.
 ///
 /// * `stream`: The stream to read from.
-async fn read_message(stream: &TcpStream) -> Result<bool, ConnectionError> {
-    todo!()
+async fn read_message(broker: &mut Sender<Event>, peer_id: &PeerId, stream: &mut BufReader<&TcpStream>) -> Result<bool, ConnectionError> {
+    let mut client_action: [u8; 1] = [0; 1];
+    if let Err(e) = stream.read_exact(&mut client_action).await {
+        return Err(ConnectionError {
+            kind: ConnectionErrorKind::IoError,
+            message: format!("Failed to read client action: {}", e),
+        });
+    }
+
+    if let Ok(client_action) = ClientAction::try_from(client_action[0]) {
+        match client_action {
+            ClientAction::CreateConference => {
+                let mut password_hash: [u8; 32] = [0; 32];
+                if let Err(e) = stream.read_exact(&mut password_hash).await {
+                    return Err(ConnectionError {
+                        kind: ConnectionErrorKind::IoError,
+                        message: format!("Failed to read conference password hash: {}", e),
+                    });
+                }
+                broker.send(Event::NewConference {
+                    peer_id: *peer_id,
+                    password_hash,
+                }).await.unwrap();
+                Ok(true)
+            },
+            ClientAction::JoinConference => {
+                let mut conference_id: [u8; 4] = [0; 4];
+                let mut password_hash: [u8; 32] = [0; 32];
+                if let Err(e) = stream.read_exact(&mut conference_id).await {
+                    return Err(ConnectionError {
+                        kind: ConnectionErrorKind::IoError,
+                        message: format!("Failed to read conference id: {}", e),
+                    });
+                }
+                if let Err(e) = stream.read_exact(&mut password_hash).await {
+                    return Err(ConnectionError {
+                        kind: ConnectionErrorKind::IoError,
+                        message: format!("Failed to read conference password hash: {}", e),
+                    });
+                }
+                let conference_id = ConferenceId::from_be_bytes(conference_id);
+                broker.send(Event::JoinConference {
+                    peer_id: *peer_id,
+                    conference_id,
+                    password_hash,
+                }).await.unwrap();
+                Ok(true)
+            },
+            ClientAction::LeaveConference => {
+                let mut conference_id: [u8; 4] = [0; 4];
+                if let Err(e) = stream.read_exact(&mut conference_id).await {
+                    return Err(ConnectionError {
+                        kind: ConnectionErrorKind::IoError,
+                        message: format!("Failed to read conference id: {}", e),
+                    });
+                }
+                let conference_id = ConferenceId::from_be_bytes(conference_id);
+                broker.send(Event::LeaveConference {
+                    peer_id: *peer_id,
+                    conference_id,
+                }).await.unwrap();
+                Ok(true)
+            },
+            ClientAction::SendMessage => {
+                let mut buffer: [u8; 4] = [0; 4];
+
+                if let Err(e) = stream.read_exact(&mut buffer).await {
+                    return Err(ConnectionError {
+                        kind: ConnectionErrorKind::IoError,
+                        message: format!("Failed to read conference id: {}", e),
+                    });
+                }
+                let conference_id = ConferenceId::from_be_bytes(buffer);
+
+                if let Err(e) = stream.read_exact(&mut buffer).await {
+                    return Err(ConnectionError {
+                        kind: ConnectionErrorKind::IoError,
+                        message: format!("Failed to read message nonce: {}", e),
+                    });
+                }
+                let message_nonce = MessageNonce::from_be_bytes(buffer);
+
+                if let Err(e) = stream.read_exact(&mut buffer).await {
+                    return Err(ConnectionError {
+                        kind: ConnectionErrorKind::IoError,
+                        message: format!("Failed to read message length: {}", e),
+                    });
+                }
+                let message_length = MessageLength::from_be_bytes(buffer);
+
+                let mut message: Vec<u8> = Vec::with_capacity(message_length as usize);
+                if let Err(e) = stream.read_exact(&mut message).await {
+                    return Err(ConnectionError {
+                        kind: ConnectionErrorKind::IoError,
+                        message: format!("Failed to read message body: {}", e),
+                    });
+                }
+
+                broker.send(Event::Message {
+                    from: *peer_id,
+                    to: conference_id,
+                    nonce: message_nonce,
+                    msg: message,
+                }).await.unwrap();
+
+                Ok(true)
+            },
+            ClientAction::Disconnect => {
+                broker.send(Event::RemovePeer {
+                    peer_id: *peer_id,
+                }).await.unwrap();
+
+                Ok(false)
+            }
+        }
+    } else {
+        Err(ConnectionError {
+            kind: ConnectionErrorKind::ProtocolError,
+            message: "Invalid client action".to_string(),
+        })
+    }
 }
 
 fn report_error(error: ConnectionError) {
@@ -161,7 +264,7 @@ async fn handle_handshake(reader: &mut BufReader<&TcpStream>) -> Result<(), Conn
 }
 
 #[repr(u8)]
-pub enum MessageType<'a> {
+pub enum ServerToClientMessageType<'a> {
     HandshakeAcknowledged = 0x00,
     ConferenceCreated(u32) = 0x01,
     ConferenceJoined = 0x02,
@@ -176,6 +279,6 @@ pub enum MessageType<'a> {
     MessageError = 0x14,
 }
 
-pub async fn send_message_to_peer(message_type: MessageType<'_>, sender: &Sender<Vec<u8>>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub async fn send_message_to_peer(message_type: ServerToClientMessageType<'_>, sender: &Sender<Vec<u8>>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     todo!()
 }

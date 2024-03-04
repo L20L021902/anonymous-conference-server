@@ -2,6 +2,7 @@ use std::sync::Arc;
 use log::{info, error, warn};
 use crate::protocol::enter_main_loop;
 
+mod constants;
 mod protocol;
 mod broker;
 
