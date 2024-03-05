@@ -12,6 +12,10 @@ pub type MessageNonce = u32;
 
 pub type MessageLength = u32;
 
+pub type PasswordHash = [u8; 32];
+
+pub const SKIP32_KEY: [u8; 10] = [0x14, 0xd3, 0xa6, 0x1a, 0xec, 0xe3, 0x8a, 0x66, 0xd2, 0x82];
+
 pub struct ConnectionError {
     pub kind: ConnectionErrorKind,
     pub message: String,
@@ -49,16 +53,21 @@ impl TryFrom<u8> for ClientAction {
 #[repr(u8)]
 pub enum ServerToClientMessageType<'a> {
     HandshakeAcknowledged = 0x00,
-    ConferenceCreated(u32) = 0x01,
-    ConferenceJoined = 0x02,
-    ConferenceLeft = 0x03,
-    MessageAccepted = 0x04,
-    IncomingMessage(&'a Vec<u8>) = 0x05,
+    ConferenceCreated((&'a PasswordHash, ConferenceId)) = 0x01,
+    ConferenceJoined(ConferenceId) = 0x02,
+    ConferenceLeft(ConferenceId) = 0x03,
+    MessageAccepted((ConferenceId, MessageNonce)) = 0x04,
+    IncomingMessage((ConferenceId, &'a Vec<u8>)) = 0x05,
 
     GeneralError = 0x10,
-    ConferenceCreationError = 0x11,
-    ConferenceJoinError = 0x12,
-    ConferenceLeaveError = 0x13,
-    MessageError = 0x14,
+    ConferenceCreationError(&'a PasswordHash) = 0x11,
+    ConferenceJoinError(ConferenceId) = 0x12,
+    ConferenceLeaveError(ConferenceId) = 0x13,
+    MessageError((ConferenceId, MessageNonce)) = 0x14,
 }
 
+impl ServerToClientMessageType<'_> {
+    pub fn value(&self) -> u8 {
+        unsafe { *(self as *const Self as *const u8) }
+    }
+}

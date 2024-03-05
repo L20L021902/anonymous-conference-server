@@ -7,7 +7,18 @@ use {
     async_std::task,
     async_std::prelude::*,
     futures::{StreamExt, channel::mpsc, sink::SinkExt},
-    crate::constants::{PROTOCOL_HEADER, ConnectionError, ConnectionErrorKind, ClientAction, PeerId, ConferenceId, MessageNonce, MessageLength, ServerToClientMessageType},
+    crate::constants::{
+        PROTOCOL_HEADER,
+        ConnectionError,
+        ConnectionErrorKind,
+        ClientAction,
+        PeerId,
+        ConferenceId,
+        MessageNonce,
+        MessageLength,
+        ServerToClientMessageType,
+        SKIP32_KEY,
+    },
     crate::broker::{Broker, Event, Sender},
 };
 
@@ -133,21 +144,21 @@ async fn read_message(broker: &mut Sender<Event>, peer_id: &PeerId, stream: &mut
                 Ok(true)
             },
             ClientAction::JoinConference => {
-                let mut conference_id: [u8; 4] = [0; 4];
+                let mut obfuscated_conference_id: [u8; 4] = [0; 4];
                 let mut password_hash: [u8; 32] = [0; 32];
-                if let Err(e) = stream.read_exact(&mut conference_id).await {
+                if let Err(e) = stream.read_exact(&mut obfuscated_conference_id).await {
                     return Err(ConnectionError {
                         kind: ConnectionErrorKind::IoError,
                         message: format!("Failed to read conference id: {}", e),
                     });
                 }
+                let conference_id = deobfuscate_conference_id(obfuscated_conference_id);
                 if let Err(e) = stream.read_exact(&mut password_hash).await {
                     return Err(ConnectionError {
                         kind: ConnectionErrorKind::IoError,
                         message: format!("Failed to read conference password hash: {}", e),
                     });
                 }
-                let conference_id = ConferenceId::from_be_bytes(conference_id);
                 broker.send(Event::JoinConference {
                     peer_id: *peer_id,
                     conference_id,
@@ -156,14 +167,14 @@ async fn read_message(broker: &mut Sender<Event>, peer_id: &PeerId, stream: &mut
                 Ok(true)
             },
             ClientAction::LeaveConference => {
-                let mut conference_id: [u8; 4] = [0; 4];
-                if let Err(e) = stream.read_exact(&mut conference_id).await {
+                let mut obfuscated_conference_id: [u8; 4] = [0; 4];
+                if let Err(e) = stream.read_exact(&mut obfuscated_conference_id).await {
                     return Err(ConnectionError {
                         kind: ConnectionErrorKind::IoError,
                         message: format!("Failed to read conference id: {}", e),
                     });
                 }
-                let conference_id = ConferenceId::from_be_bytes(conference_id);
+                let conference_id = deobfuscate_conference_id(obfuscated_conference_id);
                 broker.send(Event::LeaveConference {
                     peer_id: *peer_id,
                     conference_id,
@@ -179,7 +190,7 @@ async fn read_message(broker: &mut Sender<Event>, peer_id: &PeerId, stream: &mut
                         message: format!("Failed to read conference id: {}", e),
                     });
                 }
-                let conference_id = ConferenceId::from_be_bytes(buffer);
+                let conference_id = deobfuscate_conference_id(buffer);
 
                 if let Err(e) = stream.read_exact(&mut buffer).await {
                     return Err(ConnectionError {
@@ -263,6 +274,60 @@ async fn handle_handshake(reader: &mut BufReader<&TcpStream>) -> Result<(), Conn
     Ok(())
 }
 
-pub async fn send_message_to_peer(message_type: ServerToClientMessageType<'_>, sender: &Sender<Vec<u8>>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    todo!()
+pub async fn send_message_to_peer(message_type: ServerToClientMessageType<'_>, mut sender: Sender<Vec<u8>>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut message = vec![message_type.value()];
+    match message_type {
+        ServerToClientMessageType::HandshakeAcknowledged => {
+            // no additional data
+        },
+        ServerToClientMessageType::ConferenceCreated((conference_password_hash, conference_id)) => {
+            message.extend(conference_password_hash);
+            message.extend(obfuscate_conference_id(conference_id));
+        },
+        ServerToClientMessageType::ConferenceJoined(conference_id) => {
+            message.extend(obfuscate_conference_id(conference_id));
+        },
+        ServerToClientMessageType::ConferenceLeft(conference_id) => {
+            message.extend(obfuscate_conference_id(conference_id));
+        },
+        ServerToClientMessageType::MessageAccepted((conference_id, message_nonce)) => {
+            message.extend(obfuscate_conference_id(conference_id));
+            message.extend(message_nonce.to_be_bytes());
+        },
+        ServerToClientMessageType::IncomingMessage((conference_id, msg)) => {
+            let message_length: u32 = msg.len().try_into()?;
+            message.extend(obfuscate_conference_id(conference_id));
+            message.extend(message_length.to_be_bytes());
+            message.extend(msg);
+        },
+        ServerToClientMessageType::GeneralError => {
+            // no additional data
+        },
+        ServerToClientMessageType::ConferenceCreationError(conference_password_hash) => {
+            message.extend(conference_password_hash);
+        }
+        ServerToClientMessageType::ConferenceJoinError(conference_id) => {
+            message.extend(obfuscate_conference_id(conference_id));
+        },
+        ServerToClientMessageType::ConferenceLeaveError(conference_id) => {
+            message.extend(obfuscate_conference_id(conference_id));
+        },
+        ServerToClientMessageType::MessageError((conference_id, message_nonce)) => {
+            message.extend(obfuscate_conference_id(conference_id));
+            message.extend(message_nonce.to_be_bytes());
+        },
+    }
+
+    sender.send(message).await?;
+    Ok(())
+}
+
+fn obfuscate_conference_id(conference_id: ConferenceId) -> [u8; 4] {
+    let obfuscated_conference_id = skip32::encode(&SKIP32_KEY, conference_id);
+    obfuscated_conference_id.to_be_bytes()
+}
+
+fn deobfuscate_conference_id(obfuscated_conference_id: [u8; 4]) -> ConferenceId {
+    let conference_id = skip32::decode(&SKIP32_KEY, u32::from_be_bytes(obfuscated_conference_id));
+    conference_id
 }
