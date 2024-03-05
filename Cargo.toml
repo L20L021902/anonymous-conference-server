@@ -14,5 +14,5 @@ rand = "0.8.5"
 skip32 = "1.0.5"
 
 [dependencies.async-std]
-version = "1.6"
+version = "1.12"
 features = ["attributes"]
