@@ -1,5 +1,4 @@
-use std::sync::Arc;
-use log::{info, error, warn};
+use log::info;
 use crate::protocol::enter_main_loop;
 
 mod constants;

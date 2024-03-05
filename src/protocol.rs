@@ -1,11 +1,9 @@
-use std::{sync::Arc, net::IpAddr};
-
 use {
+    std::sync::Arc,
     log::{info, error, warn, debug},
     async_std::net::{TcpListener, TcpStream},
-    async_std::io::{BufReader, ReadExt, WriteExt},
+    async_std::io::{BufReader, ReadExt},
     async_std::task,
-    async_std::prelude::*,
     futures::{StreamExt, channel::mpsc, sink::SinkExt},
     crate::constants::{
         PROTOCOL_HEADER,
@@ -328,6 +326,5 @@ fn obfuscate_conference_id(conference_id: ConferenceId) -> [u8; 4] {
 }
 
 fn deobfuscate_conference_id(obfuscated_conference_id: [u8; 4]) -> ConferenceId {
-    let conference_id = skip32::decode(&SKIP32_KEY, u32::from_be_bytes(obfuscated_conference_id));
-    conference_id
+    skip32::decode(&SKIP32_KEY, u32::from_be_bytes(obfuscated_conference_id))
 }

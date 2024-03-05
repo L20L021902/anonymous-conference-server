@@ -164,11 +164,12 @@ impl Broker {
                         if self.is_peer_in_conference(&from, &to) {
                             for peer in &conference.peers {
                                 if peer != &from {
-                                    self.send_message(&peer, ServerToClientMessageType::IncomingMessage((to, &msg)), &mut self.internal_sender.clone()).await;
+                                    self.send_message(peer, ServerToClientMessageType::IncomingMessage((to, &msg)), &mut self.internal_sender.clone()).await;
                                     debug!("Sent message from peer {:?} to peer {:?}", from, peer);
                                 }
                             }
                             info!("Peer {:?} sent message to conference {}", from, to);
+                            self.send_message(&from, ServerToClientMessageType::MessageAccepted((to, nonce)), &mut self.internal_sender.clone()).await;
                         } else {
                             warn!("Peer {:?} tried to send message to conference {} they are not a part of", from, to);
                             self.send_message(&from, ServerToClientMessageType::MessageError((to, nonce)), &mut self.internal_sender.clone()).await;
@@ -223,10 +224,6 @@ impl Broker {
         } else {
             false
         }
-    }
-
-    fn conference_exists(&self, conference_id: &ConferenceId) -> bool {
-        self.conferences.contains_key(conference_id)
     }
 
 }
