@@ -282,8 +282,9 @@ pub async fn send_message_to_peer(message_type: ServerToClientMessageType<'_>, m
             message.extend(conference_password_hash);
             message.extend(obfuscate_conference_id(conference_id));
         },
-        ServerToClientMessageType::ConferenceJoined(conference_id) => {
+        ServerToClientMessageType::ConferenceJoined((conference_id, number_of_peers)) => {
             message.extend(obfuscate_conference_id(conference_id));
+            message.extend(number_of_peers.to_be_bytes());
         },
         ServerToClientMessageType::ConferenceLeft(conference_id) => {
             message.extend(obfuscate_conference_id(conference_id));
@@ -291,6 +292,10 @@ pub async fn send_message_to_peer(message_type: ServerToClientMessageType<'_>, m
         ServerToClientMessageType::MessageAccepted((conference_id, message_nonce)) => {
             message.extend(obfuscate_conference_id(conference_id));
             message.extend(message_nonce.to_be_bytes());
+        },
+        ServerToClientMessageType::ConferenceRestructuring((conference_id, number_of_peers)) => {
+            message.extend(obfuscate_conference_id(conference_id));
+            message.extend(number_of_peers.to_be_bytes());
         },
         ServerToClientMessageType::IncomingMessage((conference_id, msg)) => {
             let message_length: u32 = msg.len().try_into()?;

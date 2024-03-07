@@ -128,13 +128,16 @@ impl Broker {
                     self.send_message(&peer_id, ServerToClientMessageType::ConferenceCreated((&password_hash, id)), &mut self.internal_sender.clone()).await;
                 },
                 Event::JoinConference { peer_id, conference_id, password_hash } => {
+                    // TODO make this cleaner
+                    let mut peer_list_changed = false;
                     if let Some(conference) = self.conferences.get_mut(&conference_id) {
                         // check password hash
                         if memcmp::eq(&password_hash, &conference.password_hash) {
                             conference.peers.push(peer_id);
-                            self.send_message(&peer_id, ServerToClientMessageType::ConferenceJoined(conference_id), &mut self.internal_sender.clone()).await;
+                            peer_list_changed = true;
+                            let new_number_of_peers: u32 = conference.peers.len().try_into().unwrap(); // TODO
+                            self.send_message(&peer_id, ServerToClientMessageType::ConferenceJoined((conference_id, new_number_of_peers)), &mut self.internal_sender.clone()).await;
                             info!("Peer {:?} joined conference {}", peer_id, conference_id);
-                            // TODO notify all peers in the conference
                         } else {
                             warn!("Peer {:?} tried to join conference {} with wrong password", peer_id, conference_id);
                             self.send_message(&peer_id, ServerToClientMessageType::ConferenceJoinError(conference_id), &mut self.internal_sender.clone()).await;
@@ -143,11 +146,23 @@ impl Broker {
                         warn!("Peer {:?} tried to join non-existent conference {}", peer_id, conference_id);
                         self.send_message(&peer_id, ServerToClientMessageType::ConferenceJoinError(conference_id), &mut self.internal_sender.clone()).await;
                     }
+                    if peer_list_changed {
+                        let conference = &self.conferences.get(&conference_id).unwrap();
+                        let new_number_of_peers = conference.peers.len().try_into().unwrap();
+                        for peer in &conference.peers {
+                            if peer != &peer_id {
+                                self.send_message(peer, ServerToClientMessageType::ConferenceRestructuring((conference_id, new_number_of_peers)), &mut self.internal_sender.clone()).await;
+                            }
+                        }
+                    }
                 },
                 Event::LeaveConference { peer_id, conference_id } => {
+                    // TODO make this cleaner
+                    let mut peer_list_changed = false;
                     if let Some(conference) = self.conferences.get_mut(&conference_id) {
                         if let Some(pos) = conference.peers.iter().position(|&x| x == peer_id) {
                             conference.peers.remove(pos);
+                            peer_list_changed = true;
                             self.send_message(&peer_id, ServerToClientMessageType::ConferenceLeft(conference_id), &mut self.internal_sender.clone()).await;
                             info!("Peer {:?} left conference {}", peer_id, conference_id);
                         } else {
@@ -157,6 +172,15 @@ impl Broker {
                     } else {
                         warn!("Peer {:?} tried to leave non-existent conference {}", peer_id, conference_id);
                         self.send_message(&peer_id, ServerToClientMessageType::ConferenceLeaveError(conference_id), &mut self.internal_sender.clone()).await;
+                    }
+                    if peer_list_changed {
+                        let conference = &self.conferences.get(&conference_id).unwrap();
+                        let new_number_of_peers = conference.peers.len().try_into().unwrap();
+                        for peer in &conference.peers {
+                            if peer != &peer_id {
+                                self.send_message(peer, ServerToClientMessageType::ConferenceRestructuring((conference_id, new_number_of_peers)), &mut self.internal_sender.clone()).await;
+                            }
+                        }
                     }
                 },
                 Event::Message { from, to, nonce, msg } => {
@@ -225,7 +249,6 @@ impl Broker {
             false
         }
     }
-
 }
 
 async fn connection_writer_loop(

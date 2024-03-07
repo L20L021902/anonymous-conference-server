@@ -8,6 +8,8 @@ pub type PeerId = (IpAddr, u16);
 
 pub type ConferenceId = u32;
 
+pub type NumberOfPeers = u32;
+
 pub type MessageNonce = u32;
 
 pub type MessageLength = u32;
@@ -54,10 +56,11 @@ impl TryFrom<u8> for ClientAction {
 pub enum ServerToClientMessageType<'a> {
     HandshakeAcknowledged = 0x00,
     ConferenceCreated((&'a PasswordHash, ConferenceId)) = 0x01,
-    ConferenceJoined(ConferenceId) = 0x02,
+    ConferenceJoined((ConferenceId, NumberOfPeers)) = 0x02,
     ConferenceLeft(ConferenceId) = 0x03,
     MessageAccepted((ConferenceId, MessageNonce)) = 0x04,
-    IncomingMessage((ConferenceId, &'a Vec<u8>)) = 0x05,
+    ConferenceRestructuring((ConferenceId, NumberOfPeers)) = 0x05,
+    IncomingMessage((ConferenceId, &'a Vec<u8>)) = 0x06,
 
     GeneralError = 0x10,
     ConferenceCreationError(&'a PasswordHash) = 0x11,
