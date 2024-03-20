@@ -1,7 +1,8 @@
-use std::{collections::hash_map::{Entry, HashMap}, sync::Arc};
-use async_std::{prelude::*, net::TcpStream, io::WriteExt};
+use std::collections::hash_map::{Entry, HashMap};
+use async_native_tls::TlsStream;
+use async_std::{prelude::*, net::TcpStream};
 use log::{warn, info, debug};
-use futures::channel::mpsc;
+use futures::{channel::mpsc, io::WriteHalf, AsyncWriteExt};
 use futures::sink::SinkExt;
 use async_std::task;
 
@@ -22,7 +23,7 @@ pub enum Void {}
 pub enum Event {
     NewPeer {
         peer_id: PeerId,
-        stream: Arc<TcpStream>,
+        stream: WriteHalf<TlsStream<TcpStream>>,
     },
     RemovePeer {
         peer_id: PeerId,
@@ -89,7 +90,7 @@ impl Broker {
                             let (client_sender, client_receiver) = mpsc::unbounded();
                             entry.insert(client_sender);
                             info!("Added new peer {:?}", peer_id);
-                            // self.send_message(&peer_id, ServerToClientMessageType::HandshakeAcknowledged, &mut self.internal_sender.clone()).await; // message will be sent in the connection_writer_loop TODO: check
+                            self.send_message(&peer_id, ServerToClientMessageType::HandshakeAcknowledged, &mut self.internal_sender.clone()).await; // message will be sent in the connection_writer_loop TODO: check
                             let mut sender = self.internal_sender.clone();
                             let writer_handle = task::spawn(async move {
                                 if let Err(e) = connection_writer_loop(client_receiver, stream).await {
@@ -251,13 +252,14 @@ impl Broker {
     }
 }
 
-async fn connection_writer_loop(
+async fn connection_writer_loop<T>(
     mut messages: Receiver<Vec<u8>>,
-    stream: Arc<TcpStream>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut stream = &*stream;
+    mut stream: WriteHalf<T>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
+where T: AsyncWriteExt
+{
     while let Some(msg) = messages.next().await {
-        stream.write_all(&msg).await?;
+        async_std::io::WriteExt::write_all(&mut stream, &msg).await?;
     }
     Ok(())
 }

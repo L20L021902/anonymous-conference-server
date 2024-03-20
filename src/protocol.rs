@@ -1,10 +1,10 @@
 use {
-    std::sync::Arc,
     log::{info, error, warn, debug},
     async_std::net::{TcpListener, TcpStream},
-    async_std::io::{BufReader, ReadExt},
+    async_std::io::{BufReader, BufRead},
     async_std::task,
-    futures::{StreamExt, channel::mpsc, sink::SinkExt},
+    async_native_tls::TlsStream,
+    futures::{StreamExt, channel::mpsc, sink::SinkExt, AsyncReadExt},
     crate::constants::{
         PROTOCOL_HEADER,
         ConnectionError,
@@ -18,6 +18,7 @@ use {
         SKIP32_KEY,
     },
     crate::broker::{Broker, Event, Sender},
+    crate::tls,
 };
 
 async fn read_stdio(mut sender: Sender<Event>) {
@@ -45,7 +46,8 @@ async fn read_stdio(mut sender: Sender<Event>) {
     }
 }
 
-pub async fn enter_main_loop(listening_address: String, listening_port: u16) {
+pub async fn enter_main_loop(listening_address: String, listening_port: u16, pfx_file: &str) {
+    let tls_acceptor = tls::make_tls_acceptor(pfx_file).await.expect("Could not create TLS acceptor");
     let listener = TcpListener::bind(format!("{}:{}", &listening_address, &listening_port)).await.expect("Could not bind to address");
     let (broker_sender, broker_receiver) = mpsc::unbounded();
     let broker = Broker::new(broker_receiver, broker_sender.clone());
@@ -57,11 +59,17 @@ pub async fn enter_main_loop(listening_address: String, listening_port: u16) {
     let mut incoming = listener.incoming();
 
     while let Some(stream) = incoming.next().await {
+        let acceptor = tls_acceptor.clone();
         if let Ok(stream) = stream {
             debug!("Connection established!");
             let broker_sender_copy = broker_sender.clone();
             task::spawn(async move {
-                handle_connection(broker_sender_copy, stream).await
+                if let Ok(stream) = acceptor.accept(stream).await {
+                    debug!("TLS handshake completed");
+                    handle_connection(broker_sender_copy, stream).await
+                } else {
+                    warn!("Failed to establish TLS connection");
+                };
             });
         } else {
             warn!("Failed to establish connection");
@@ -71,22 +79,21 @@ pub async fn enter_main_loop(listening_address: String, listening_port: u16) {
     broker_handle.await;
 }
 
-async fn handle_connection(mut broker: Sender<Event>, stream: TcpStream) {
-    let stream = Arc::new(stream);
-    let mut reader = BufReader::new(&*stream);
+async fn handle_connection(mut broker: Sender<Event>, stream: TlsStream<TcpStream>) {
+    let peer_addr = stream.get_ref().peer_addr().unwrap();
+    let peer_id = (peer_addr.ip(), peer_addr.port());
+    let (read_stream, write_stream) = stream.split();
+    let mut reader = BufReader::new(read_stream);
 
     // check handshake
     if let Err(e) = handle_handshake(&mut reader).await {
         report_error(e);
-        shutdown_connection(stream);
         return;
     }
 
-    let peer_addr = stream.peer_addr().unwrap();
-    let peer_id = (peer_addr.ip(), peer_addr.port());
     broker.send(Event::NewPeer {
         peer_id,
-        stream: Arc::clone(&stream),
+        stream: write_stream,
     }).await.unwrap();
 
     loop {
@@ -97,7 +104,6 @@ async fn handle_connection(mut broker: Sender<Event>, stream: TcpStream) {
             },
             Ok(false) => {
                 // close connection
-                shutdown_connection(stream);
                 return;
             },
             Err(e) => {
@@ -105,7 +111,6 @@ async fn handle_connection(mut broker: Sender<Event>, stream: TcpStream) {
                 broker.send(Event::RemovePeer {
                     peer_id,
                 }).await.unwrap();
-                shutdown_connection(stream);
                 return;
             },
         }
@@ -116,7 +121,7 @@ async fn handle_connection(mut broker: Sender<Event>, stream: TcpStream) {
 /// returns true if the connection should be kept open, false if it should be closed.
 ///
 /// * `stream`: The stream to read from.
-async fn read_message(broker: &mut Sender<Event>, peer_id: &PeerId, stream: &mut BufReader<&TcpStream>) -> Result<bool, ConnectionError> {
+async fn read_message(broker: &mut Sender<Event>, peer_id: &PeerId, stream: &mut (impl BufRead + Unpin)) -> Result<bool, ConnectionError> {
     let mut client_action: [u8; 1] = [0; 1];
     if let Err(e) = stream.read_exact(&mut client_action).await {
         return Err(ConnectionError {
@@ -246,13 +251,7 @@ fn report_error(error: ConnectionError) {
     }
 }
 
-fn shutdown_connection(stream: Arc<TcpStream>) {
-    if stream.shutdown(std::net::Shutdown::Both).is_err() {
-        error!("Failed to close connection");
-    }
-}
-
-async fn handle_handshake(reader: &mut BufReader<&TcpStream>) -> Result<(), ConnectionError> {
+async fn handle_handshake(reader: &mut (impl BufRead + Unpin)) -> Result<(), ConnectionError> {
     let mut protocol_header_buffer: [u8; PROTOCOL_HEADER.len()] = [0; PROTOCOL_HEADER.len()];
 
     if reader.read_exact(&mut protocol_header_buffer).await.is_err() {
