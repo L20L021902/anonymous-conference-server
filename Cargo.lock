@@ -17,10 +17,10 @@ version = "0.1.0"
 dependencies = [
  "async-native-tls",
  "async-std",
+ "constant_time_eq",
  "env_logger",
  "futures",
  "log",
- "openssl",
  "rand",
  "skip32",
 ]
@@ -312,6 +312,12 @@ checksum = "d16048cd947b08fa32c24458a22f5dc5e835264f689f4f5653210c69fd107363"
 dependencies = [
  "crossbeam-utils",
 ]
+
+[[package]]
+name = "constant_time_eq"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7144d30dcf0fafbce74250a3963025d8d52177934239851c917d29f1df280c2"
 
 [[package]]
 name = "core-foundation"
