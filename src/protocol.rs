@@ -290,7 +290,7 @@ async fn read_message(broker: &mut Sender<Event>, peer_id: &PeerId, stream: &mut
                 let message_length = MessageLength::from_be_bytes(buffer);
 
                 let mut message: Vec<u8> = Vec::with_capacity(message_length as usize);
-                if let Err(e) = stream.read_exact(&mut message).await {
+                if let Err(e) = stream.take(message_length.into()).read_to_end(&mut message).await {
                     return Err(ConnectionError {
                         kind: ConnectionErrorKind::IoError,
                         message: format!("Failed to read message body: {}", e),
@@ -317,7 +317,7 @@ async fn read_message(broker: &mut Sender<Event>, peer_id: &PeerId, stream: &mut
     } else {
         Err(ConnectionError {
             kind: ConnectionErrorKind::ProtocolError,
-            message: "Invalid client action".to_string(),
+            message: format!("Invalid client action: {}", client_action[0]),
         })
     }
 }
