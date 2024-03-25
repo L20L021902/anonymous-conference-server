@@ -62,7 +62,7 @@ impl TryFrom<u8> for ClientAction {
 pub enum ServerToClientMessageType<'a> {
     HandshakeAcknowledged = 0x00,
     ConferenceCreated((PacketNonce, ConferenceId)) = 0x01,
-    ConferenceJoinSalt((PacketNonce, ConferenceJoinSalt)) = 0x02,
+    ConferenceJoinSalt((PacketNonce, ConferenceId, ConferenceJoinSalt)) = 0x02,
     ConferenceJoined((PacketNonce, ConferenceId, NumberOfPeers, ConferenceEncryptionSalt)) = 0x03,
     ConferenceLeft((PacketNonce, ConferenceId)) = 0x04,
     MessageAccepted((PacketNonce, ConferenceId)) = 0x05,

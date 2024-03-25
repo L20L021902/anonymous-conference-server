@@ -359,8 +359,9 @@ pub async fn send_message_to_peer(message_type: ServerToClientMessageType<'_>, m
             message.extend(nonce.to_be_bytes());
             message.extend(obfuscate_conference_id(conference_id));
         },
-        ServerToClientMessageType::ConferenceJoinSalt((nonce, conference_join_salt)) => {
+        ServerToClientMessageType::ConferenceJoinSalt((nonce, conference_id, conference_join_salt)) => {
             message.extend(nonce.to_be_bytes());
+            message.extend(obfuscate_conference_id(conference_id));
             message.extend(conference_join_salt);
         },
         ServerToClientMessageType::ConferenceJoined((nonce, conference_id, number_of_peers, encryption_salt)) => {

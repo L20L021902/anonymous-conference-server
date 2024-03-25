@@ -144,7 +144,7 @@ impl Broker {
                 },
                 Event::GetConferenceJoinSalt { nonce, peer_id, conference_id } => {
                     if let Some(conference) = self.conferences.get(&conference_id) {
-                        self.send_message(&peer_id, ServerToClientMessageType::ConferenceJoinSalt((nonce, conference.join_salt)), &mut self.internal_sender.clone()).await;
+                        self.send_message(&peer_id, ServerToClientMessageType::ConferenceJoinSalt((nonce, conference_id, conference.join_salt)), &mut self.internal_sender.clone()).await;
                     } else {
                         warn!("Peer {:?} tried to get join salt for non-existent conference {}", peer_id, conference_id);
                         self.send_message(&peer_id, ServerToClientMessageType::ConferenceJoinSaltError((nonce, conference_id)), &mut self.internal_sender.clone()).await;
