@@ -3,6 +3,7 @@ use crate::protocol::enter_main_loop;
 
 mod constants;
 mod tls;
+mod protocol_reader;
 mod protocol;
 mod broker;
 
