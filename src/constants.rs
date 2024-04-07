@@ -82,3 +82,7 @@ impl ServerToClientMessageType<'_> {
         unsafe { *(self as *const Self as *const u8) }
     }
 }
+
+#[derive(Debug)]
+pub enum Void {}
+

@@ -1,12 +1,10 @@
-use crate::constants::{PasswordHash, ConferenceJoinSalt, ConferenceEncryptionSalt};
-
 use {
     log::{info, error, warn, debug},
     async_std::net::{TcpListener, TcpStream},
     async_std::io::{BufReader, BufRead},
     async_std::task,
     async_native_tls::TlsStream,
-    futures::{StreamExt, channel::mpsc, sink::SinkExt, AsyncReadExt},
+    futures::{StreamExt, channel::mpsc, sink::SinkExt, AsyncReadExt, select, FutureExt},
     crate::constants::{
         PROTOCOL_HEADER,
         ConnectionError,
@@ -18,12 +16,16 @@ use {
         MessageLength,
         ServerToClientMessageType,
         SKIP32_KEY,
+        ConferenceEncryptionSalt,
+        ConferenceJoinSalt,
+        PasswordHash,
+        Void,
     },
     crate::broker::{Broker, Event, Sender},
     crate::tls,
 };
 
-async fn read_stdio(mut sender: Sender<Event>) {
+async fn read_stdio(mut sender: Sender<Event>, shutdown_sender: Sender<Void>) {
     let mut input = String::new();
     loop {
         async_std::io::stdin().read_line(&mut input).await.unwrap();
@@ -39,7 +41,8 @@ async fn read_stdio(mut sender: Sender<Event>) {
                 debug!("Sending test message");
             },
             "exit" => {
-                sender.send(Event::CleanShutdown).await.unwrap();
+                drop(shutdown_sender); // first we stop accepting new clients
+                sender.send(Event::CleanShutdown).await.unwrap(); // then we notify the sender to shutdown
                 break;
             },
             _ => (),
@@ -54,31 +57,46 @@ pub async fn enter_main_loop(listening_address: String, listening_port: u16, pfx
     let (broker_sender, broker_receiver) = mpsc::unbounded();
     let broker = Broker::new(broker_receiver, broker_sender.clone());
     let broker_handle = task::spawn(broker.broker_loop());
+    let (shutdown_sender, mut shutdown_receiver) = mpsc::unbounded::<Void>();
 
     // start async io for stdin
-    task::spawn(read_stdio(broker_sender.clone()));
+    task::spawn(read_stdio(broker_sender.clone(), shutdown_sender));
 
     let mut incoming = listener.incoming();
-
-    while let Some(stream) = incoming.next().await {
-        let acceptor = tls_acceptor.clone();
-        if let Ok(stream) = stream {
-            debug!("Connection established!");
-            let broker_sender_copy = broker_sender.clone();
-            task::spawn(async move {
-                if let Ok(stream) = acceptor.accept(stream).await {
-                    debug!("TLS handshake completed");
-                    handle_connection(broker_sender_copy, stream).await
-                } else {
-                    warn!("Failed to establish TLS connection");
-                };
-            });
-        } else {
-            warn!("Failed to establish connection");
+    loop {
+        select! {
+            stream = incoming.next().fuse() => match stream {
+                Some(stream) => match stream {
+                    Ok(stream) => {
+                        debug!("Connection established!");
+                        let acceptor = tls_acceptor.clone();
+                        let broker_sender_copy = broker_sender.clone();
+                        task::spawn(async move {
+                            if let Ok(stream) = acceptor.accept(stream).await {
+                                debug!("TLS handshake completed");
+                                handle_connection(broker_sender_copy, stream).await
+                            } else {
+                                warn!("Failed to establish TLS connection");
+                            };
+                        });
+                    },
+                    Err(_) => {
+                        warn!("Failed to establish connection");
+                    },
+                },
+                None => break,
+            },
+            void = shutdown_receiver.next().fuse() => match void {
+                Some(void) => match void {}, // compile time assert
+                None => break,
+            },
         }
     }
+
     drop(broker_sender);
+    debug!("Waiting for broker to finish");
     broker_handle.await;
+    debug!("Main loop exited");
 }
 
 async fn handle_connection(mut broker: Sender<Event>, stream: TlsStream<TcpStream>) {

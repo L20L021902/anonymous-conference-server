@@ -4,7 +4,7 @@ use async_std::{prelude::*, net::TcpStream};
 use log::{warn, info, debug};
 use futures::{channel::mpsc, io::WriteHalf, AsyncWriteExt};
 use futures::sink::SinkExt;
-use async_std::task;
+use async_std::task::{self, JoinHandle};
 use constant_time_eq::constant_time_eq_32;
 
 use crate::constants::{ConferenceEncryptionSalt, ConferenceId, ConferenceJoinSalt, PacketNonce, PasswordHash, PeerId, ServerToClientMessageType};
@@ -27,9 +27,6 @@ impl Conference {
         false
     }
 }
-
-#[derive(Debug)]
-pub enum Void {}
 
 #[derive(Debug)]
 pub enum Event {
@@ -108,6 +105,7 @@ pub struct Broker {
     conferences: HashMap<ConferenceId, Conference>,
     last_conference_id: u32,
     internal_sender: InternalSender,
+    writers: Vec<JoinHandle<()>>
 }
 
 impl Broker {
@@ -118,12 +116,12 @@ impl Broker {
             conferences: HashMap::new(),
             last_conference_id: 0,
             internal_sender: InternalSender{sender: sender_copy},
+            writers: Vec::new(),
         }
     }
 
     pub async fn broker_loop(mut self) {
         mpsc::unbounded::<(String, Receiver<String>)>();
-        let mut writers = Vec::new();
 
         while let Some(event) = self.events.next().await {
             match event {
@@ -145,7 +143,7 @@ impl Broker {
                                     sender.send(Event::RemovePeer { peer_id }).await.unwrap(); // TODO: check
                                 }
                             });
-                            writers.push(writer_handle);
+                            self.writers.push(writer_handle);
                         }
                     }
                 },
@@ -262,9 +260,10 @@ impl Broker {
         }
         drop(self.conferences);
         drop(self.peers);
-        for writer in writers {
+        for writer in self.writers {
             writer.await;
         }
+        debug!("Broker loop finished");
     }
 
     async fn process_leave_conference(&mut self, nonce: PacketNonce, peer_id: PeerId, conference_id: ConferenceId) {
