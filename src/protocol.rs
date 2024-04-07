@@ -108,13 +108,17 @@ async fn handle_connection(mut broker: Sender<Event>, stream: TlsStream<TcpStrea
     }).await.unwrap();
 
     loop {
-        match read_message(&mut broker, &peer_id, &mut reader).await {
-            Ok(true) => {
+        match read_message(&peer_id, &mut reader).await {
+            Ok(Some(event)) => {
                 // keep connection open
+                broker.send(event).await.unwrap();
                 continue;
             },
-            Ok(false) => {
+            Ok(None) => {
                 // close connection
+                broker.send(Event::RemovePeer {
+                    peer_id,
+                }).await.unwrap();
                 return;
             },
             Err(e) => {

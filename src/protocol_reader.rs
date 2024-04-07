@@ -2,10 +2,10 @@ use crate::constants::{
     ConnectionError, ConnectionErrorKind, PacketNonce, MessageLength, ClientAction, PeerId,
     ConferenceId, ConferenceEncryptionSalt, ConferenceJoinSalt, PasswordHash, SKIP32_KEY,
 };
-use crate::broker::{Event, Sender};
+use crate::broker::Event;
 
 use async_std::io::BufRead;
-use futures::{AsyncReadExt, SinkExt};
+use futures::AsyncReadExt;
 
 async fn read_nonce(reader: &mut (impl BufRead + Unpin)) -> Result<PacketNonce, ConnectionError> {
     let mut buffer: [u8; std::mem::size_of::<PacketNonce>()] = [0; std::mem::size_of::<PacketNonce>()];
@@ -95,7 +95,7 @@ async fn read_message_body(reader: &mut (impl BufRead + Unpin), message_length: 
 /// returns true if the connection should be kept open, false if it should be closed.
 ///
 /// * `stream`: The stream to read from.
-pub async fn read_message(broker: &mut Sender<Event>, peer_id: &PeerId, stream: &mut (impl BufRead + Unpin)) -> Result<bool, ConnectionError> {
+pub async fn read_message(peer_id: &PeerId, stream: &mut (impl BufRead + Unpin)) -> Result<Option<Event>, ConnectionError> {
     let mut client_action: [u8; 1] = [0; 1];
     if let Err(e) = stream.read_exact(&mut client_action).await {
         return Err(ConnectionError {
@@ -112,49 +112,45 @@ pub async fn read_message(broker: &mut Sender<Event>, peer_id: &PeerId, stream: 
                 let join_salt = read_join_salt(stream).await?;
                 let encryption_salt = read_encryption_salt(stream).await?;
 
-                broker.send(Event::NewConference {
+                Ok(Some(Event::NewConference {
                     nonce,
                     peer_id: *peer_id,
                     password_hash,
                     join_salt,
                     encryption_salt,
-                }).await.unwrap();
-                Ok(true)
+                }))
             },
             ClientAction::GetConferenceJoinSalt => {
                 let nonce = read_nonce(stream).await?;
                 let conference_id = read_conference_id(stream).await?;
 
-                broker.send(Event::GetConferenceJoinSalt {
+                Ok(Some(Event::GetConferenceJoinSalt {
                     nonce,
                     peer_id: *peer_id,
                     conference_id,
-                }).await.unwrap();
-                Ok(true)
+                }))
             },
             ClientAction::JoinConference => {
                 let nonce = read_nonce(stream).await?;
                 let conference_id = read_conference_id(stream).await?;
                 let password_hash = read_password_hash(stream).await?;
 
-                broker.send(Event::JoinConference {
+                Ok(Some(Event::JoinConference {
                     nonce,
                     peer_id: *peer_id,
                     conference_id,
                     password_hash,
-                }).await.unwrap();
-                Ok(true)
+                }))
             },
             ClientAction::LeaveConference => {
                 let nonce = read_nonce(stream).await?;
                 let conference_id = read_conference_id(stream).await?;
 
-                broker.send(Event::LeaveConference {
+                Ok(Some(Event::LeaveConference {
                     nonce,
                     peer_id: *peer_id,
                     conference_id,
-                }).await.unwrap();
-                Ok(true)
+                }))
             },
             ClientAction::SendMessage => {
                 let nonce = read_nonce(stream).await?;
@@ -162,21 +158,15 @@ pub async fn read_message(broker: &mut Sender<Event>, peer_id: &PeerId, stream: 
                 let message_length = read_message_length(stream).await?;
                 let message = read_message_body(stream, message_length).await?;
 
-                broker.send(Event::Message {
+                Ok(Some(Event::Message {
                     nonce,
                     from: *peer_id,
                     to: conference_id,
                     msg: message,
-                }).await.unwrap();
-
-                Ok(true)
+                }))
             },
             ClientAction::Disconnect => {
-                broker.send(Event::RemovePeer {
-                    peer_id: *peer_id,
-                }).await.unwrap();
-
-                Ok(false)
+                Ok(None)
             }
         }
     } else {
