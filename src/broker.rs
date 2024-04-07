@@ -8,7 +8,7 @@ use async_std::task::{self, JoinHandle};
 use constant_time_eq::constant_time_eq_32;
 
 use crate::constants::{ConferenceEncryptionSalt, ConferenceId, ConferenceJoinSalt, PacketNonce, PasswordHash, PeerId, ServerToClientMessageType};
-use crate::protocol::send_message_to_peer;
+use crate::protocol_writer::send_message_to_peer;
 
 struct Conference {
     id: ConferenceId,
