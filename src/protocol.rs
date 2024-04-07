@@ -137,6 +137,90 @@ async fn handle_connection(mut broker: Sender<Event>, stream: TlsStream<TcpStrea
     }
 }
 
+async fn read_nonce(reader: &mut (impl BufRead + Unpin)) -> Result<PacketNonce, ConnectionError> {
+    let mut buffer: [u8; std::mem::size_of::<PacketNonce>()] = [0; std::mem::size_of::<PacketNonce>()];
+    if let Err(e) = reader.read_exact(&mut buffer).await {
+        return Err(ConnectionError {
+            kind: ConnectionErrorKind::IoError,
+            message: format!("Failed to read packet nonce: {}", e),
+        });
+    }
+
+    Ok(PacketNonce::from_be_bytes(buffer))
+}
+
+async fn read_message_length(reader: &mut (impl BufRead + Unpin)) -> Result<MessageLength, ConnectionError> {
+    let mut buffer: [u8; std::mem::size_of::<MessageLength>()] = [0; std::mem::size_of::<MessageLength>()];
+    if let Err(e) = reader.read_exact(&mut buffer).await {
+        return Err(ConnectionError {
+            kind: ConnectionErrorKind::IoError,
+            message: format!("Failed to read message length: {}", e),
+        });
+    }
+
+    Ok(MessageLength::from_be_bytes(buffer))
+}
+
+async fn read_password_hash(reader: &mut (impl BufRead + Unpin)) -> Result<PasswordHash, ConnectionError> {
+    let mut buffer: PasswordHash = [0; std::mem::size_of::<PasswordHash>()];
+    if let Err(e) = reader.read_exact(&mut buffer).await {
+        return Err(ConnectionError {
+            kind: ConnectionErrorKind::IoError,
+            message: format!("Failed to read conference password hash: {}", e),
+        });
+    }
+
+    Ok(buffer)
+}
+
+async fn read_join_salt(reader: &mut (impl BufRead + Unpin)) -> Result<ConferenceJoinSalt, ConnectionError> {
+    let mut buffer: ConferenceJoinSalt = [0; std::mem::size_of::<ConferenceJoinSalt>()];
+    if let Err(e) = reader.read_exact(&mut buffer).await {
+        return Err(ConnectionError {
+            kind: ConnectionErrorKind::IoError,
+            message: format!("Failed to read conference join salt: {}", e),
+        });
+    }
+
+    Ok(buffer)
+}
+
+async fn read_encryption_salt(reader: &mut (impl BufRead + Unpin)) -> Result<ConferenceEncryptionSalt, ConnectionError> {
+    let mut buffer: ConferenceEncryptionSalt = [0; std::mem::size_of::<ConferenceEncryptionSalt>()];
+    if let Err(e) = reader.read_exact(&mut buffer).await {
+        return Err(ConnectionError {
+            kind: ConnectionErrorKind::IoError,
+            message: format!("Failed to read conference encryption salt: {}", e),
+        });
+    }
+
+    Ok(buffer)
+}
+
+async fn read_conference_id(reader: &mut (impl BufRead + Unpin)) -> Result<ConferenceId, ConnectionError> {
+    let mut buffer: [u8; std::mem::size_of::<ConferenceId>()] = [0; std::mem::size_of::<ConferenceId>()];
+    if let Err(e) = reader.read_exact(&mut buffer).await {
+        return Err(ConnectionError {
+            kind: ConnectionErrorKind::IoError,
+            message: format!("Failed to read conference id: {}", e),
+        });
+    }
+
+    Ok(deobfuscate_conference_id(buffer))
+}
+
+async fn read_message_body(reader: &mut (impl BufRead + Unpin), message_length: MessageLength) -> Result<Vec<u8>, ConnectionError> {
+    let mut buffer: Vec<u8> = Vec::with_capacity(message_length as usize);
+    if let Err(e) = reader.take(message_length.into()).read_to_end(&mut buffer).await {
+        return Err(ConnectionError {
+            kind: ConnectionErrorKind::IoError,
+            message: format!("Failed to read message body: {}", e),
+        });
+    }
+
+    Ok(buffer)
+}
+
 /// Reads a message from the peer.
 /// returns true if the connection should be kept open, false if it should be closed.
 ///
@@ -153,38 +237,10 @@ async fn read_message(broker: &mut Sender<Event>, peer_id: &PeerId, stream: &mut
     if let Ok(client_action) = ClientAction::try_from(client_action[0]) {
         match client_action {
             ClientAction::CreateConference => {
-                let mut nonce: [u8; 4] = [0; 4];
-                if let Err(e) = stream.read_exact(&mut nonce).await {
-                    return Err(ConnectionError {
-                        kind: ConnectionErrorKind::IoError,
-                        message: format!("Failed to read packet nonce: {}", e),
-                    });
-                }
-                let nonce = u32::from_be_bytes(nonce);
-
-                let mut password_hash: PasswordHash = [0; 32];
-                if let Err(e) = stream.read_exact(&mut password_hash).await {
-                    return Err(ConnectionError {
-                        kind: ConnectionErrorKind::IoError,
-                        message: format!("Failed to read conference password hash: {}", e),
-                    });
-                }
-
-                let mut join_salt: ConferenceJoinSalt = [0; 32];
-                if let Err(e) = stream.read_exact(&mut join_salt).await {
-                    return Err(ConnectionError {
-                        kind: ConnectionErrorKind::IoError,
-                        message: format!("Failed to read conference join salt: {}", e),
-                    });
-                }
-
-                let mut encryption_salt: ConferenceEncryptionSalt = [0; 32];
-                if let Err(e) = stream.read_exact(&mut encryption_salt).await {
-                    return Err(ConnectionError {
-                        kind: ConnectionErrorKind::IoError,
-                        message: format!("Failed to read conference encryption salt: {}", e),
-                    });
-                }
+                let nonce = read_nonce(stream).await?;
+                let password_hash = read_password_hash(stream).await?;
+                let join_salt = read_join_salt(stream).await?;
+                let encryption_salt = read_encryption_salt(stream).await?;
 
                 broker.send(Event::NewConference {
                     nonce,
@@ -196,23 +252,8 @@ async fn read_message(broker: &mut Sender<Event>, peer_id: &PeerId, stream: &mut
                 Ok(true)
             },
             ClientAction::GetConferenceJoinSalt => {
-                let mut nonce: [u8; 4] = [0; 4];
-                if let Err(e) = stream.read_exact(&mut nonce).await {
-                    return Err(ConnectionError {
-                        kind: ConnectionErrorKind::IoError,
-                        message: format!("Failed to read packet nonce: {}", e),
-                    });
-                }
-                let nonce = u32::from_be_bytes(nonce);
-
-                let mut obfuscated_conference_id: [u8; 4] = [0; 4];
-                if let Err(e) = stream.read_exact(&mut obfuscated_conference_id).await {
-                    return Err(ConnectionError {
-                        kind: ConnectionErrorKind::IoError,
-                        message: format!("Failed to read conference id: {}", e),
-                    });
-                }
-                let conference_id = deobfuscate_conference_id(obfuscated_conference_id);
+                let nonce = read_nonce(stream).await?;
+                let conference_id = read_conference_id(stream).await?;
 
                 broker.send(Event::GetConferenceJoinSalt {
                     nonce,
@@ -222,30 +263,10 @@ async fn read_message(broker: &mut Sender<Event>, peer_id: &PeerId, stream: &mut
                 Ok(true)
             },
             ClientAction::JoinConference => {
-                let mut nonce: [u8; 4] = [0; 4];
-                if let Err(e) = stream.read_exact(&mut nonce).await {
-                    return Err(ConnectionError {
-                        kind: ConnectionErrorKind::IoError,
-                        message: format!("Failed to read packet nonce: {}", e),
-                    });
-                }
-                let nonce = u32::from_be_bytes(nonce);
+                let nonce = read_nonce(stream).await?;
+                let conference_id = read_conference_id(stream).await?;
+                let password_hash = read_password_hash(stream).await?;
 
-                let mut obfuscated_conference_id: [u8; 4] = [0; 4];
-                let mut password_hash: [u8; 32] = [0; 32];
-                if let Err(e) = stream.read_exact(&mut obfuscated_conference_id).await {
-                    return Err(ConnectionError {
-                        kind: ConnectionErrorKind::IoError,
-                        message: format!("Failed to read conference id: {}", e),
-                    });
-                }
-                let conference_id = deobfuscate_conference_id(obfuscated_conference_id);
-                if let Err(e) = stream.read_exact(&mut password_hash).await {
-                    return Err(ConnectionError {
-                        kind: ConnectionErrorKind::IoError,
-                        message: format!("Failed to read conference password hash: {}", e),
-                    });
-                }
                 broker.send(Event::JoinConference {
                     nonce,
                     peer_id: *peer_id,
@@ -255,23 +276,9 @@ async fn read_message(broker: &mut Sender<Event>, peer_id: &PeerId, stream: &mut
                 Ok(true)
             },
             ClientAction::LeaveConference => {
-                let mut nonce: [u8; 4] = [0; 4];
-                if let Err(e) = stream.read_exact(&mut nonce).await {
-                    return Err(ConnectionError {
-                        kind: ConnectionErrorKind::IoError,
-                        message: format!("Failed to read packet nonce: {}", e),
-                    });
-                }
-                let nonce = u32::from_be_bytes(nonce);
+                let nonce = read_nonce(stream).await?;
+                let conference_id = read_conference_id(stream).await?;
 
-                let mut obfuscated_conference_id: [u8; 4] = [0; 4];
-                if let Err(e) = stream.read_exact(&mut obfuscated_conference_id).await {
-                    return Err(ConnectionError {
-                        kind: ConnectionErrorKind::IoError,
-                        message: format!("Failed to read conference id: {}", e),
-                    });
-                }
-                let conference_id = deobfuscate_conference_id(obfuscated_conference_id);
                 broker.send(Event::LeaveConference {
                     nonce,
                     peer_id: *peer_id,
@@ -280,40 +287,10 @@ async fn read_message(broker: &mut Sender<Event>, peer_id: &PeerId, stream: &mut
                 Ok(true)
             },
             ClientAction::SendMessage => {
-                let mut buffer: [u8; 4] = [0; 4];
-
-                if let Err(e) = stream.read_exact(&mut buffer).await {
-                    return Err(ConnectionError {
-                        kind: ConnectionErrorKind::IoError,
-                        message: format!("Failed to read packet nonce: {}", e),
-                    });
-                }
-                let nonce = u32::from_be_bytes(buffer);
-
-
-                if let Err(e) = stream.read_exact(&mut buffer).await {
-                    return Err(ConnectionError {
-                        kind: ConnectionErrorKind::IoError,
-                        message: format!("Failed to read conference id: {}", e),
-                    });
-                }
-                let conference_id = deobfuscate_conference_id(buffer);
-
-                if let Err(e) = stream.read_exact(&mut buffer).await {
-                    return Err(ConnectionError {
-                        kind: ConnectionErrorKind::IoError,
-                        message: format!("Failed to read message length: {}", e),
-                    });
-                }
-                let message_length = MessageLength::from_be_bytes(buffer);
-
-                let mut message: Vec<u8> = Vec::with_capacity(message_length as usize);
-                if let Err(e) = stream.take(message_length.into()).read_to_end(&mut message).await {
-                    return Err(ConnectionError {
-                        kind: ConnectionErrorKind::IoError,
-                        message: format!("Failed to read message body: {}", e),
-                    });
-                }
+                let nonce = read_nonce(stream).await?;
+                let conference_id = read_conference_id(stream).await?;
+                let message_length = read_message_length(stream).await?;
+                let message = read_message_body(stream, message_length).await?;
 
                 broker.send(Event::Message {
                     nonce,
