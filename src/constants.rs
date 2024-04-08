@@ -59,6 +59,7 @@ impl TryFrom<u8> for ClientAction {
 }
 
 #[repr(u8)]
+#[derive(Clone)]
 pub enum ServerToClientMessageType<'a> {
     HandshakeAcknowledged = 0x00,
     ConferenceCreated((PacketNonce, ConferenceId)) = 0x01,

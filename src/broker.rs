@@ -71,100 +71,127 @@ pub enum Event {
     CleanShutdown,
 }
 
-struct InternalSender {
-    sender: Sender<Event>,
-}
-
-impl InternalSender {
-    async fn _notify_peers_about_restructuring(&mut self, conference_id: ConferenceId, conference: &Conference, peers: &HashMap<PeerId, Sender<Vec<u8>>>) {
-        let new_number_of_peers = conference.peers.len().try_into().unwrap();
-        for peer in &conference.peers {
-            self.send_message(peer, peers, ServerToClientMessageType::ConferenceRestructuring((conference_id, new_number_of_peers))).await;
-        }
-    }
-
-    async fn send_message(&mut self, peer_id: &PeerId, peers: &HashMap<PeerId, Sender<Vec<u8>>>, message_type: ServerToClientMessageType<'_>) {
-        if let Err(e) = send_message_to_peer(message_type, peers.get(peer_id).unwrap().clone()).await {
-            warn!("Failed to send message to peer {:?}: {}", peer_id, e);
-            self.remove_peer(peer_id).await;
-        }
-    }
-
-    async fn remove_peer(&mut self, peer_id: &PeerId) {
-        self.sender.send(Event::RemovePeer { peer_id: *peer_id }).await.unwrap();
-    }
-
-}
-
 pub type Sender<T> = mpsc::UnboundedSender<T>;
 pub type Receiver<T> = mpsc::UnboundedReceiver<T>;
 
+struct PeerManager {
+    broker_sender: Sender<Event>,
+    peers: HashMap<PeerId, Sender<Vec<u8>>>,
+    writers: Vec<JoinHandle<()>>,
+}
+
+impl PeerManager {
+    pub fn new(broker_sender: Sender<Event>) -> Self {
+        Self {
+            broker_sender,
+            peers: HashMap::new(),
+            writers: Vec::new(),
+        }
+    }
+
+    /// Add new peer, returns `true` if peer was added, otherwise returns `false`
+    pub fn add_peer(&mut self, peer_id: PeerId, stream: WriteHalf<TlsStream<TcpStream>>) -> bool {
+        match self.peers.entry(peer_id) {
+            Entry::Vacant(entry) => {
+                let (client_sender, client_receiver) = mpsc::unbounded();
+                entry.insert(client_sender);
+                info!("Added new peer {:?}", peer_id);
+                let mut sender = self.broker_sender.clone();
+                let writer_handle = task::spawn(async move {
+                    if let Err(e) = connection_writer_loop(client_receiver, stream).await {
+                        warn!("Error in connection writer loop: {}", e);
+                        sender.send(Event::RemovePeer { peer_id }).await.unwrap(); // TODO: check
+                    }
+                });
+                self.writers.push(writer_handle);
+                true
+            },
+            Entry::Occupied(_) => {
+                warn!("Peer already exists: {:?}", peer_id);
+                false
+            },
+        }
+
+    }
+
+    pub fn remove_peer(&mut self, peer_id: PeerId) {
+        self.peers.remove(&peer_id);
+        debug!("Removed peer {:?}", peer_id);
+    }
+
+    async fn send_message(&self, peer_id: &PeerId, message_type: ServerToClientMessageType<'_>) {
+        let mut sender = &self.broker_sender;
+        if let Err(e) = send_message_to_peer(&message_type, self.peers.get(peer_id).unwrap().clone()).await {
+            warn!("Failed to send message to peer {:?}: {}", peer_id, e);
+            sender.send(Event::RemovePeer { peer_id: *peer_id }).await.unwrap();
+        }
+    }
+
+    async fn batch_send_message(&self, peer_ids: &[PeerId], message_type: ServerToClientMessageType<'_>) {
+        let mut sender = &self.broker_sender;
+        for peer_id in peer_ids {
+            if let Err(e) = send_message_to_peer(&message_type, self.peers.get(peer_id).unwrap().clone()).await {
+                warn!("Failed to send message to peer {:?}: {}", peer_id, e);
+                sender.send(Event::RemovePeer { peer_id: *peer_id }).await.unwrap();
+            }
+        }
+    }
+
+    pub async fn shutdown(self) {
+        debug!("Shutting down peer manager");
+        drop(self.peers);
+        for writer in self.writers {
+            writer.await;
+        }
+        debug!("Shut down peer manager");
+    }
+
+}
+
 pub struct Broker {
     events: Receiver<Event>,
-    peers: HashMap<PeerId, Sender<Vec<u8>>>,
     conferences: HashMap<ConferenceId, Conference>,
     last_conference_id: u32,
-    internal_sender: InternalSender,
-    writers: Vec<JoinHandle<()>>
+    peer_manager: PeerManager,
 }
 
 impl Broker {
     pub fn new(events: Receiver<Event>, sender_copy: Sender<Event>) -> Broker {
         Broker {
             events,
-            peers: HashMap::new(),
             conferences: HashMap::new(),
             last_conference_id: 0,
-            internal_sender: InternalSender{sender: sender_copy},
-            writers: Vec::new(),
+            peer_manager: PeerManager::new(sender_copy),
         }
     }
 
     pub async fn broker_loop(mut self) {
-        mpsc::unbounded::<(String, Receiver<String>)>();
-
         while let Some(event) = self.events.next().await {
             match event {
                 Event::NewPeer { peer_id, stream } => self.process_new_peer(peer_id, stream).await,
                 Event::RemovePeer { peer_id } => {
                     // remove peer from all conferences
+                    let mut conferences_to_restructure = Vec::new();
                     for conference in self.conferences.values_mut() {
                         if conference.remove_peer(peer_id) {
-                            self.internal_sender._notify_peers_about_restructuring(conference.id, conference, &self.peers).await;
+                            conferences_to_restructure.push(conference.id);
                         }
                     }
+                    for conference_id in conferences_to_restructure {
+                        self.notify_peers_about_restructuring(conference_id).await;
+                    }
                     debug!("Removed peer {:?} from all conferences", peer_id);
-                    self.peers.remove(&peer_id);
-                    debug!("Removed peer {:?}", peer_id);
+                    self.peer_manager.remove_peer(peer_id);
                 },
                 Event::NewConference { nonce, peer_id, password_hash, join_salt, encryption_salt } => 
                     self.process_new_conference(nonce, peer_id, password_hash, join_salt, encryption_salt).await,
                 Event::GetConferenceJoinSalt { nonce, peer_id, conference_id } => self.process_get_conference_join_salt(nonce, peer_id, conference_id).await,
                 Event::JoinConference { nonce, peer_id, conference_id, password_hash } => self.process_join_conference(nonce, peer_id, conference_id, password_hash).await,
                 Event::LeaveConference { nonce, peer_id, conference_id } => self.process_leave_conference(nonce, peer_id, conference_id).await,
-                Event::Message { from, to, nonce, msg } => {
-                    if let Some(conference) = self.conferences.get(&to) {
-                        if self.is_peer_in_conference(&from, &to) {
-                            for peer in &conference.peers {
-                                if peer != &from {
-                                    self.send_message(peer, ServerToClientMessageType::IncomingMessage((to, &msg)), &mut self.internal_sender.sender.clone()).await;
-                                    debug!("Sent message from peer {:?} to peer {:?}, message length was {}", from, peer, msg.len());
-                                }
-                            }
-                            info!("Peer {:?} sent message to conference {}", from, to);
-                            self.send_message(&from, ServerToClientMessageType::MessageAccepted((nonce, to)), &mut self.internal_sender.sender.clone()).await;
-                        } else {
-                            warn!("Peer {:?} tried to send message to conference {} they are not a part of", from, to);
-                            self.send_message(&from, ServerToClientMessageType::MessageError((nonce, to)), &mut self.internal_sender.sender.clone()).await;
-                        }
-                    } else {
-                        warn!("Peer {:?} tried to send message to non-existent conference {}", from, to);
-                        self.send_message(&from, ServerToClientMessageType::MessageError((nonce, to)), &mut self.internal_sender.sender.clone()).await;
-                    }
-                },
+                Event::Message { from, to, nonce, msg } => self.process_message(&from, to, nonce, msg).await,
                 Event::ListPeers => {
                     info!("Listing peers:");
-                    for (i, (peer_id, _)) in self.peers.iter().enumerate(){
+                    for (i, (peer_id, _)) in self.peer_manager.peers.iter().enumerate(){
                         info!("Peer {}: {:?}", i, peer_id);
                     }
                     info!("End of peer list");
@@ -178,39 +205,18 @@ impl Broker {
                 },
                 Event::CleanShutdown => {
                     info!("Broker shutting down");
-                    drop(self.internal_sender);
                     break;
                 },
             }
         }
         drop(self.conferences);
-        drop(self.peers);
-        for writer in self.writers {
-            writer.await;
-        }
+        self.peer_manager.shutdown().await;
         debug!("Broker loop finished");
     }
 
     async fn process_new_peer(&mut self, peer_id: PeerId, stream: WriteHalf<TlsStream<TcpStream>>) {
-        match self.peers.entry(peer_id) {
-            Entry::Occupied(..) => {
-                warn!("Peer already exists: {:?}", peer_id);
-                self.send_message(&peer_id, ServerToClientMessageType::HandshakeAcknowledged, &mut self.internal_sender.sender.clone()).await;
-            },
-            Entry::Vacant(entry) => {
-                let (client_sender, client_receiver) = mpsc::unbounded();
-                entry.insert(client_sender);
-                info!("Added new peer {:?}", peer_id);
-                self.send_message(&peer_id, ServerToClientMessageType::HandshakeAcknowledged, &mut self.internal_sender.sender.clone()).await; // message will be sent in the connection_writer_loop
-                let mut sender = self.internal_sender.sender.clone();
-                let writer_handle = task::spawn(async move {
-                    if let Err(e) = connection_writer_loop(client_receiver, stream).await {
-                        warn!("Error in connection writer loop: {}", e);
-                        sender.send(Event::RemovePeer { peer_id }).await.unwrap(); // TODO: check
-                    }
-                });
-                self.writers.push(writer_handle);
-            }
+        if self.peer_manager.add_peer(peer_id, stream) {
+            self.peer_manager.send_message(&peer_id, ServerToClientMessageType::HandshakeAcknowledged).await;
         }
     }
 
@@ -222,7 +228,7 @@ impl Broker {
         let id = self.last_conference_id;
         if self.conferences.contains_key(&id) {
             warn!("Conference storage reached maximum capacity");
-            self.send_message(&peer_id, ServerToClientMessageType::ConferenceCreationError(nonce), &mut self.internal_sender.sender.clone()).await;
+            self.peer_manager.send_message(&peer_id, ServerToClientMessageType::ConferenceCreationError(nonce)).await;
             return;
         }
 
@@ -235,85 +241,81 @@ impl Broker {
         });
 
         info!("Conference created: id: {}, by peer_id: {:?}", id, peer_id);
-        self.send_message(&peer_id, ServerToClientMessageType::ConferenceCreated((nonce, id)), &mut self.internal_sender.sender.clone()).await;
+        self.peer_manager.send_message(&peer_id, ServerToClientMessageType::ConferenceCreated((nonce, id))).await;
     }
 
     async fn process_get_conference_join_salt(&mut self, nonce: PacketNonce, peer_id: PeerId, conference_id: ConferenceId) {
         if let Some(conference) = self.conferences.get(&conference_id) {
-            self.send_message(&peer_id, ServerToClientMessageType::ConferenceJoinSalt((nonce, conference_id, conference.join_salt)),
-                &mut self.internal_sender.sender.clone()).await;
+            self.peer_manager.send_message(&peer_id, ServerToClientMessageType::ConferenceJoinSalt((nonce, conference_id, conference.join_salt))).await;
         } else {
             warn!("Peer {:?} tried to get join salt for non-existent conference {}", peer_id, conference_id);
-            self.send_message(&peer_id, ServerToClientMessageType::ConferenceJoinSaltError((nonce, conference_id)), &mut self.internal_sender.sender.clone()).await;
+            self.peer_manager.send_message(&peer_id, ServerToClientMessageType::ConferenceJoinSaltError((nonce, conference_id))).await;
         }
     }
 
     async fn process_leave_conference(&mut self, nonce: PacketNonce, peer_id: PeerId, conference_id: ConferenceId) {
         if let Some(conference) = self.conferences.get_mut(&conference_id) {
             if conference.remove_peer(peer_id) {
-                self.send_message(&peer_id, ServerToClientMessageType::ConferenceLeft((nonce, conference_id)), &mut self.internal_sender.sender.clone()).await;
+                self.peer_manager.send_message(&peer_id, ServerToClientMessageType::ConferenceLeft((nonce, conference_id))).await;
                 info!("Peer {:?} left conference {}", peer_id, conference_id);
-                self._notify_peers_about_restructuring(conference_id).await;
+                self.notify_peers_about_restructuring(conference_id).await;
             } else {
                 warn!("Peer {:?} tried to leave non-existent conference {}", peer_id, conference_id);
-                self.send_message(&peer_id, ServerToClientMessageType::ConferenceLeaveError((nonce, conference_id)), &mut self.internal_sender.sender.clone()).await;
+                self.peer_manager.send_message(&peer_id, ServerToClientMessageType::ConferenceLeaveError((nonce, conference_id))).await;
             }
         }
     }
 
     async fn process_join_conference(&mut self, nonce: PacketNonce, peer_id: PeerId, conference_id: ConferenceId, password_hash: PasswordHash) {
-        // TODO make this cleaner
-        let mut peer_list_changed = false;
         if let Some(conference) = self.conferences.get_mut(&conference_id) {
             // check password hash
             if constant_time_eq_32(&password_hash, &conference.password_hash) {
                 if conference.peers.len() >= NumberOfPeers::MAX as usize {
                     warn!("Peer {:?} tried to join full conference", peer_id);
-                    self.send_message(&peer_id, ServerToClientMessageType::ConferenceJoinError((nonce, conference_id)), &mut self.internal_sender.sender.clone()).await;
+                    self.peer_manager.send_message(&peer_id, ServerToClientMessageType::ConferenceJoinError((nonce, conference_id))).await;
                     return;
                 }
                 conference.peers.push(peer_id);
-                peer_list_changed = true;
                 let new_number_of_peers: u32 = conference.peers.len().try_into().unwrap(); // TODO
                 let encryption_salt = conference.encryption_salt;
-                self.send_message(&peer_id, ServerToClientMessageType::ConferenceJoined((nonce, conference_id, new_number_of_peers, encryption_salt)), &mut self.internal_sender.sender.clone()).await;
+                self.peer_manager.send_message(&peer_id, ServerToClientMessageType::ConferenceJoined((nonce, conference_id, new_number_of_peers, encryption_salt))).await;
                 info!("Peer {:?} joined conference {}", peer_id, conference_id);
+                self.notify_peers_about_restructuring(conference_id).await;
             } else {
                 warn!("Peer {:?} tried to join conference {} with wrong password", peer_id, conference_id);
-                self.send_message(&peer_id, ServerToClientMessageType::ConferenceJoinError((nonce, conference_id)), &mut self.internal_sender.sender.clone()).await;
+                self.peer_manager.send_message(&peer_id, ServerToClientMessageType::ConferenceJoinError((nonce, conference_id))).await;
             }
         } else {
             warn!("Peer {:?} tried to join non-existent conference {}", peer_id, conference_id);
-            self.send_message(&peer_id, ServerToClientMessageType::ConferenceJoinError((nonce, conference_id)), &mut self.internal_sender.sender.clone()).await;
+            self.peer_manager.send_message(&peer_id, ServerToClientMessageType::ConferenceJoinError((nonce, conference_id))).await;
         }
-        if peer_list_changed {
-            let conference = &self.conferences.get(&conference_id).unwrap();
-            let new_number_of_peers = conference.peers.len().try_into().unwrap();
-            for peer in &conference.peers {
-                if peer != &peer_id {
-                    self.send_message(peer, ServerToClientMessageType::ConferenceRestructuring((conference_id, new_number_of_peers)), &mut self.internal_sender.sender.clone()).await;
+    }
+
+    async fn process_message(&mut self, peer_id: &PeerId, conference_id: ConferenceId, nonce: PacketNonce, msg: Vec<u8>) {
+        if let Some(conference) = self.conferences.get(&conference_id) {
+            if self.is_peer_in_conference(peer_id, &conference_id) {
+                for peer in &conference.peers {
+                    if peer != peer_id {
+                        self.peer_manager.send_message(peer, ServerToClientMessageType::IncomingMessage((conference_id, &msg))).await;
+                        debug!("Sent message from peer {:?} to peer {:?}, message length was {}", peer_id, peer, msg.len());
+                    }
                 }
+                info!("Peer {:?} sent message to conference {}", peer_id, conference_id);
+                self.peer_manager.send_message(peer_id, ServerToClientMessageType::MessageAccepted((nonce, conference_id))).await;
+            } else {
+                warn!("Peer {:?} tried to send message to conference {} they are not a part of", peer_id, conference_id);
+                self.peer_manager.send_message(peer_id, ServerToClientMessageType::MessageError((nonce, conference_id))).await;
             }
+        } else {
+            warn!("Peer {:?} tried to send message to non-existent conference {}", peer_id, conference_id);
+            self.peer_manager.send_message(peer_id, ServerToClientMessageType::MessageError((nonce, conference_id))).await;
         }
     }
 
-    async fn send_message(&self, peer_id: &PeerId, message_type: ServerToClientMessageType<'_>, sender: &mut Sender<Event>) {
-        if let Err(e) = send_message_to_peer(message_type, self.peers.get(peer_id).unwrap().clone()).await {
-            warn!("Failed to send message to peer {:?}: {}", peer_id, e);
-            self.remove_peer(peer_id, sender).await;
-        }
-    }
-
-    async fn remove_peer(&self, peer_id: &PeerId, sender: &mut Sender<Event>) {
-        sender.send(Event::RemovePeer { peer_id: *peer_id }).await.unwrap();
-    }
-
-    async fn _notify_peers_about_restructuring(&self, conference_id: ConferenceId) {
+    async fn notify_peers_about_restructuring(&self, conference_id: ConferenceId) {
         let conference = self.conferences.get(&conference_id).unwrap();
         let new_number_of_peers = conference.peers.len().try_into().unwrap();
-        for peer in &conference.peers {
-            self.send_message(peer, ServerToClientMessageType::ConferenceRestructuring((conference_id, new_number_of_peers)), &mut self.internal_sender.sender.clone()).await;
-        }
+        self.peer_manager.batch_send_message(&conference.peers, ServerToClientMessageType::ConferenceRestructuring((conference_id, new_number_of_peers))).await;
     }
 
     fn is_peer_in_conference(&self, peer_id: &PeerId, conference_id: &ConferenceId) -> bool {
