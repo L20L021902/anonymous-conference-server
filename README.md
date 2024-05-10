@@ -1,16 +1,14 @@
 # 匿名会议系统服务器
 
 ## 运行方式
+
 `RUST_LOG=debug cargo run`
 
 >`RUST_LOG=debug`将日志级别设置为调试
 
----
-
 ## 编译方式
-`cargo build`
 
----
+`cargo build`
 
 ## 可用命令
  
