@@ -28,9 +28,6 @@ async fn read_stdio(mut sender: Sender<Event>, shutdown_sender: Sender<Void>) {
             "conferences" => {
                 sender.send(Event::ListConferences).await.unwrap();
             },
-            "test" => {
-                debug!("Sending test message");
-            },
             "exit" => {
                 drop(shutdown_sender); // first we stop accepting new clients
                 sender.send(Event::CleanShutdown).await.unwrap(); // then we notify the sender to shutdown
