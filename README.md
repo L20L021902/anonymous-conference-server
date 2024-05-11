@@ -1,5 +1,7 @@
 # 匿名会议系统服务器
 
+\>[可执行文件可在发布页面获取](https://github.com/L20L021902/anonymous-conference-server/releases/latest)<
+
 ## 运行方式
 
 Windows:
