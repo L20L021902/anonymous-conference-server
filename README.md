@@ -12,7 +12,7 @@ Windows:
 
 Linux:
 
-1. 执行`RUST_LOG=debug cargo run`
+1. 执行`RUST_LOG=debug ./anonymous-conference-server`
 
 >`RUST_LOG=debug`将日志级别设置为调试
 
