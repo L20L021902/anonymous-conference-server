@@ -2,7 +2,15 @@
 
 ## 运行方式
 
-`RUST_LOG=debug cargo run`
+Windows:
+
+1. 打开命令提示符
+2. 执行`set RUST_LOG=debug`
+3. 执行`.\anonymous-conference-server.exe`
+
+Linux:
+
+1. 执行`RUST_LOG=debug cargo run`
 
 >`RUST_LOG=debug`将日志级别设置为调试
 

@@ -39,8 +39,8 @@ async fn read_stdio(mut sender: Sender<Event>, shutdown_sender: Sender<Void>) {
     }
 }
 
-pub async fn enter_main_loop(listening_address: String, listening_port: u16, pfx_file: &str) {
-    let tls_acceptor = tls::make_tls_acceptor(pfx_file).await.expect("Could not create TLS acceptor");
+pub async fn enter_main_loop(listening_address: String, listening_port: u16) {
+    let tls_acceptor = tls::make_tls_acceptor().await.expect("Could not create TLS acceptor");
     let listener = TcpListener::bind(format!("{}:{}", &listening_address, &listening_port)).await.expect("Could not bind to address");
     let (broker_sender, broker_receiver) = mpsc::unbounded();
     let broker = Broker::new(broker_receiver, broker_sender.clone());
