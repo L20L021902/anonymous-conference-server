@@ -157,3 +157,34 @@ async fn handle_handshake(reader: &mut (impl BufRead + Unpin)) -> Result<(), Con
 }
 
 
+#[cfg(test)]
+mod tests {
+    use async_std::io::Cursor;
+
+    use rand::Rng;
+    use crate::constants::ConferenceId;
+    use crate::protocol_reader::deobfuscate_conference_id;
+    use crate::protocol_writer::obfuscate_conference_id;
+
+    use super::*;
+
+    #[async_std::test]
+    async fn test_handle_handshake() {
+        let handshake = b"\x1CAnonymousConference protocol";
+        let mut reader = Cursor::new(handshake);
+        assert!(handle_handshake(&mut reader).await.is_ok())
+    }
+
+    #[test]
+    fn test_conference_id_obfuscation_deobfuscation() {
+        let conference_id: ConferenceId = rand::thread_rng().gen();
+
+        let obfuscated = obfuscate_conference_id(&conference_id);
+        let deobfuscated = deobfuscate_conference_id(obfuscated);
+
+        assert_eq!(conference_id, deobfuscated);
+    }
+
+}
+
+

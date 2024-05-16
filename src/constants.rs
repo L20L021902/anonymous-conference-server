@@ -22,11 +22,13 @@ pub type ConferenceEncryptionSalt = [u8; 32];
 
 pub const SKIP32_KEY: [u8; 10] = [0x14, 0xd3, 0xa6, 0x1a, 0xec, 0xe3, 0x8a, 0x66, 0xd2, 0x82];
 
+#[derive(Debug)]
 pub struct ConnectionError {
     pub kind: ConnectionErrorKind,
     pub message: String,
 }
 
+#[derive(Debug)]
 pub enum ConnectionErrorKind {
     IoError,
     ProtocolError,
