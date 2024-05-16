@@ -260,14 +260,22 @@ impl Broker {
                 info!("Peer {:?} left conference {}", peer_id, conference_id);
                 self.notify_peers_about_restructuring(conference_id).await;
             } else {
-                warn!("Peer {:?} tried to leave non-existent conference {}", peer_id, conference_id);
+                warn!("Peer {:?} tried to leave conference they are not a part of {}", peer_id, conference_id);
                 self.peer_manager.send_message(&peer_id, ServerToClientMessageType::ConferenceLeaveError((nonce, conference_id))).await;
             }
+        } else {
+            warn!("Peer {:?} tried to leave non-existent conference {}", peer_id, conference_id);
+            self.peer_manager.send_message(&peer_id, ServerToClientMessageType::ConferenceLeaveError((nonce, conference_id))).await;
         }
     }
 
     async fn process_join_conference(&mut self, nonce: PacketNonce, peer_id: PeerId, conference_id: ConferenceId, password_hash: PasswordHash) {
         if let Some(conference) = self.conferences.get_mut(&conference_id) {
+            if conference.peers.contains(&peer_id) {
+                warn!("Peer {:?} tried to join conference they are already a part of", peer_id);
+                self.peer_manager.send_message(&peer_id, ServerToClientMessageType::ConferenceJoinError((nonce, conference_id))).await;
+                return;
+            }
             // check password hash
             if constant_time_eq_32(&password_hash, &conference.password_hash) {
                 if conference.peers.len() >= NumberOfPeers::MAX as usize {
